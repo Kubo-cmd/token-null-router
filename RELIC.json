@@ -1,0 +1,9 @@
+{
+  "artifact": "TOKEN NULL ROUTER",
+  "version": "0.1.0",
+  "sigil": "TNR-ZERO-v010-DDAD5AE7C438",
+  "content_digest": "ddad5ae7c438d3d1f573f764976ebd15ac912755543bcb3ba7f355472264ac98",
+  "council_sequence": 652,
+  "council_decision_digest": "e069685bae6cc917c03ecefdb6ce136080a2df394f9db1c2bf4eb47301bfd6d5",
+  "claim": "ZERO means a verified route invoked no model and recorded model_tokens=0. Arbitrary novel reasoning is never claimed to be free."
+}
