@@ -21,8 +21,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install test dependencies
-        run: python -m pip install -e ".[test]"
+      - name: Install test and build dependencies
+        run: python -m pip install "setuptools>=68" -e ".[test]"
       - name: Run tests
         run: python -m pytest -q
       - name: Verify clean package
