@@ -12,26 +12,32 @@ Every decision is appended to an fsync-backed SHA-256 receipt chain. Cache entri
 ## Run
 
 ```bash
-cd /Users/test/projects/token-null-router
 python3 -m venv .venv
-.venv/bin/pip install -e . pytest
-.venv/bin/token-null route ping
+. .venv/bin/activate
+python -m pip install -e ".[test]"
+token-null --state-dir .state route ping
 ```
+
+Windows PowerShell and no-activation commands are documented in
+[`docs/PORTABLE_SETUP.md`](docs/PORTABLE_SETUP.md).
 
 Add a response only after local evidence exists:
 
 ```bash
-EVIDENCE=$(.venv/bin/token-null digest 'verified local evidence')
-.venv/bin/token-null put 'release status' 'green' \
+EVIDENCE=$(token-null digest 'verified local evidence')
+token-null --state-dir .state put 'release status' 'green' \
   --context-digest commit-a --evidence-digest "$EVIDENCE" --ttl 300
-.venv/bin/token-null route 'release status' --context-digest commit-a
+token-null --state-dir .state route 'release status' --context-digest commit-a
 ```
 
 Unknown inputs exit `3` so a wrapper can invoke Hermes only on escalation:
 
 ```bash
-.venv/bin/token-null route "$INPUT" || hermes chat
+token-null --state-dir .state route "$INPUT"
 ```
+
+Exit code `3` means a separate wrapper should invoke its configured model path.
+This package does not choose or call that model.
 
 ## Safety properties
 
@@ -45,6 +51,17 @@ Unknown inputs exit `3` so a wrapper can invoke Hermes only on escalation:
 ## Tests
 
 ```bash
-.venv/bin/pytest -q
-.venv/bin/token-null verify
+python -m pytest --collect-only -q
+python -m pytest -q
+python scripts/verify_clean_package.py
+token-null --state-dir .state verify
 ```
+
+The clean-package gate builds from a temporary copy, installs the wheel into a
+fresh virtual environment without an index, then exercises the installed CLI.
+
+## Project policies
+
+- [Security policy](SECURITY.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [MIT license](LICENSE)
