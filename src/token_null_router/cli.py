@@ -19,8 +19,14 @@ def _parser() -> argparse.ArgumentParser:
     route.add_argument("text")
     route.add_argument("--namespace", default="default")
     route.add_argument("--context-digest", default="static")
+    route.add_argument(
+        "--side-effect",
+        action="append",
+        default=[],
+        help="Declare a required side effect; any declaration forces escalation",
+    )
 
-    put = sub.add_parser("put", help="Add an evidence-bound exact response")
+    put = sub.add_parser("put", help="Add a caller-attested exact response")
     put.add_argument("text")
     put.add_argument("response")
     put.add_argument("--evidence-digest", required=True)
@@ -28,9 +34,9 @@ def _parser() -> argparse.ArgumentParser:
     put.add_argument("--namespace", default="default")
     put.add_argument("--context-digest", default="static")
 
-    sub.add_parser("stats", help="Show cache and proof-ledger health")
+    sub.add_parser("stats", help="Show cache and receipt-ledger health")
     sub.add_parser("verify", help="Verify the complete receipt hash chain")
-    digest = sub.add_parser("digest", help="SHA-256 a local evidence string")
+    digest = sub.add_parser("digest", help="SHA-256 a caller-supplied evidence string")
     digest.add_argument("text")
     return parser
 
@@ -44,7 +50,10 @@ def main(argv: list[str] | None = None) -> int:
     router = TokenNullRouter(Path(args.state_dir))
     if args.command == "route":
         result = router.route(
-            args.text, namespace=args.namespace, context_digest=args.context_digest
+            args.text,
+            namespace=args.namespace,
+            context_digest=args.context_digest,
+            side_effects=args.side_effect,
         )
         print(json.dumps(result.to_dict(), sort_keys=True))
         return 0 if result.route == "ZERO" else 3

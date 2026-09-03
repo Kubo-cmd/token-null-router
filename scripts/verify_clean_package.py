@@ -102,7 +102,7 @@ def main() -> int:
             run([str(cli), "--state-dir", str(state), "verify"], cwd=tmp).stdout
         )
         if routed.get("route") != "ZERO" or routed.get("model_tokens") != 0:
-            raise RuntimeError("installed CLI did not produce the expected proven route")
+            raise RuntimeError("installed CLI did not produce the expected ZERO route")
         if verified != {"receipts": 1, "valid": True}:
             raise RuntimeError(f"installed CLI receipt verification failed: {verified}")
 

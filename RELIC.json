@@ -1,9 +1,10 @@
 {
   "artifact": "TOKEN NULL ROUTER",
   "version": "0.1.0",
-  "sigil": "TNR-ZERO-v010-DDAD5AE7C438",
-  "content_digest": "ddad5ae7c438d3d1f573f764976ebd15ac912755543bcb3ba7f355472264ac98",
-  "council_sequence": 652,
-  "council_decision_digest": "e069685bae6cc917c03ecefdb6ce136080a2df394f9db1c2bf4eb47301bfd6d5",
-  "claim": "ZERO means a verified route invoked no model and recorded model_tokens=0. Arbitrary novel reasoning is never claimed to be free."
+  "sigil": "TNR-ZERO-v010-1C325091A839",
+  "content_digest": "1c325091a839bd17e61227abd4c377b8aefbb6ce3ab888f89b1dd9b53b7815fd",
+  "content_digest_scope": "all tracked and non-ignored repository files except RELIC.json and scripts/verify_relic.py",
+  "verifier": "scripts/verify_relic.py",
+  "verifier_digest": "3fbeba98f0c1d2694f1f804727a57fbf4373722881f7dc259edf56ca0dd43896",
+  "metadata_digest": "ee462527cbfdd4d6426887e4fcfb7f0d20252a156cb54686387bea858da2eeeb"
 }

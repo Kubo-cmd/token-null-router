@@ -1,4 +1,4 @@
-"""Proof-carrying zero-token routing."""
+"""Deterministic zero-model-token routing with chained receipts."""
 
 from .router import Decision, TokenNullRouter
 

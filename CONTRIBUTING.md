@@ -17,7 +17,7 @@ Platform-specific environment commands are in `docs/PORTABLE_SETUP.md`.
 
 ## Change requirements
 
-- Preserve fail-closed behavior for unknown, stale, malformed, context-mismatched, and side-effecting requests.
+- Preserve fail-closed behavior for unknown, stale, malformed, context-mismatched, and declared side-effecting requests.
 - Add a regression test for behavior changes.
 - Do not add model, telemetry, or network clients without an explicit design review.
 - Keep credentials, generated state, virtual environments, caches, and build artifacts out of Git.
