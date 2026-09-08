@@ -9,9 +9,10 @@ import re
 import sqlite3
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 _SCHEMA = "1"
 _UNSAFE = re.compile(
@@ -106,19 +107,48 @@ class TokenNullRouter:
 
     def __init__(self, state_dir: str | Path):
         self.state_dir = Path(state_dir).expanduser().resolve()
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.state_dir.chmod(0o700)
         self.db_path = self.state_dir / "cache.sqlite3"
         self.ledger_path = self.state_dir / "receipts.jsonl"
-        self._init_db()
+        self._cache_available = True
+        try:
+            self._init_db()
+        except sqlite3.DatabaseError:
+            self._cache_available = False
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=FULL")
-        return conn
+        try:
+            self.db_path.chmod(0o600)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            self._secure_cache_files()
+            return conn
+        except (OSError, sqlite3.Error):
+            conn.close()
+            raise
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    def _secure_cache_files(self) -> None:
+        for path in (
+            self.db_path,
+            self.db_path.with_name(self.db_path.name + "-wal"),
+            self.db_path.with_name(self.db_path.name + "-shm"),
+        ):
+            if path.exists():
+                path.chmod(0o600)
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS cache (
                     key TEXT PRIMARY KEY,
@@ -131,6 +161,7 @@ class TokenNullRouter:
                     expires_at REAL NOT NULL
                 )"""
             )
+        self._secure_cache_files()
 
     @staticmethod
     def cache_key(prompt: str, namespace: str, context_digest: str) -> str:
@@ -169,24 +200,31 @@ class TokenNullRouter:
         ttl = _finite_number(ttl_seconds, "ttl_seconds")
         if ttl < 0:
             raise ValueError("ttl_seconds must be non-negative")
+        if not self._cache_available:
+            raise RuntimeError("cache database is unavailable")
         now = time.time()
         key = self.cache_key(prompt, namespace, context_digest)
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO cache
-                (key, namespace, prompt, context_digest, response, evidence_digest, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    key,
-                    namespace,
-                    _canonical(prompt),
-                    context_digest,
-                    response,
-                    evidence_digest,
-                    now,
-                    now + ttl,
-                ),
-            )
+        try:
+            with self._connection() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO cache
+                    (key, namespace, prompt, context_digest, response, evidence_digest, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        key,
+                        namespace,
+                        _canonical(prompt),
+                        context_digest,
+                        response,
+                        evidence_digest,
+                        now,
+                        now + ttl,
+                    ),
+                )
+            self._secure_cache_files()
+        except sqlite3.DatabaseError as exc:
+            self._cache_available = False
+            raise RuntimeError("cache database is unavailable") from exc
         return key
 
     def route(
@@ -220,12 +258,18 @@ class TokenNullRouter:
                 evidence_digest=_digest("builtin:" + canonical + ":" + response),
             )
 
+        if not self._cache_available:
+            return self._escalate("cache_unavailable", canonical, namespace, context_digest)
         key = self.cache_key(canonical, namespace, context_digest)
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT response, evidence_digest, created_at, expires_at FROM cache WHERE key = ?",
-                (key,),
-            ).fetchone()
+        try:
+            with self._connection() as conn:
+                row = conn.execute(
+                    "SELECT response, evidence_digest, created_at, expires_at FROM cache WHERE key = ?",
+                    (key,),
+                ).fetchone()
+        except sqlite3.DatabaseError:
+            self._cache_available = False
+            return self._escalate("cache_unavailable", canonical, namespace, context_digest)
         if row is None:
             return self._escalate("novel_input", canonical, namespace, context_digest)
         response, evidence_digest, created_at, expires_at = row
@@ -299,6 +343,7 @@ class TokenNullRouter:
 
     def _append_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
         self.ledger_path.touch(mode=0o600, exist_ok=True)
+        self.ledger_path.chmod(0o600)
         with self.ledger_path.open("r+", encoding="utf-8") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
@@ -335,8 +380,15 @@ class TokenNullRouter:
         return valid, count
 
     def stats(self) -> dict[str, Any]:
-        with self._connect() as conn:
-            cache_entries = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+        cache_entries = None
+        cache_valid = self._cache_available
+        if cache_valid:
+            try:
+                with self._connection() as conn:
+                    cache_entries = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            except sqlite3.DatabaseError:
+                self._cache_available = False
+                cache_valid = False
         valid, receipts = self.verify_ledger()
         zero = escalate = 0
         if valid and self.ledger_path.exists():
@@ -353,6 +405,7 @@ class TokenNullRouter:
                 zero = escalate = 0
         return {
             "cache_entries": cache_entries,
+            "cache_valid": cache_valid,
             "receipts": receipts,
             "ledger_valid": valid,
             "zero_routes": zero,

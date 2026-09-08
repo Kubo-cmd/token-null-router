@@ -22,4 +22,4 @@ A report should receive an acknowledgement within seven days. No response-time g
 
 ## Scope
 
-Important security properties include fail-closed escalation, context binding, finite cache expiration, receipt-chain integrity, and avoiding unintended model or network calls. Evidence digests are caller attestations and do not prove semantic truth. Keyword screening is defense in depth; callers must declare side effects explicitly.
+Important security properties include fail-closed escalation, context binding, finite cache expiration, private local state modes, receipt-chain integrity, and avoiding unintended model or network calls. Corrupt cache state cannot produce cache hits; cache-dependent routes escalate as `cache_unavailable`. Evidence digests are caller attestations and do not prove semantic truth. Keyword screening is defense in depth; callers must declare side effects explicitly.

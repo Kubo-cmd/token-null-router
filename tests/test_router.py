@@ -1,3 +1,7 @@
+import json
+import os
+import stat
+
 import pytest
 
 from token_null_router import TokenNullRouter
@@ -203,6 +207,78 @@ def test_stats_are_observed_not_estimated(tmp_path):
     router.route("ping")
     router.route("unknown")
     stats = router.stats()
+    assert stats["cache_valid"] is True
     assert stats["zero_routes"] == 1
     assert stats["escalations"] == 1
     assert stats["ledger_valid"] is True
+
+
+def test_state_and_cache_files_are_private_even_with_common_umask(tmp_path):
+    previous = os.umask(0o022)
+    try:
+        router = TokenNullRouter(tmp_path / "state")
+        router.route("ping")
+        router.put("cached", "value", evidence_digest=EVIDENCE)
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(router.state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(router.db_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(router.ledger_path.stat().st_mode) == 0o600
+    for suffix in ("-wal", "-shm"):
+        sidecar = router.db_path.with_name(router.db_path.name + suffix)
+        if sidecar.exists():
+            assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+
+
+def test_existing_permissive_state_modes_are_tightened(tmp_path):
+    state = tmp_path / "state"
+    router = TokenNullRouter(state)
+    router.route("ping")
+    state.chmod(0o755)
+    router.db_path.chmod(0o644)
+    router.ledger_path.chmod(0o644)
+
+    reopened = TokenNullRouter(state)
+    reopened.route("ping")
+
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(reopened.db_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(reopened.ledger_path.stat().st_mode) == 0o600
+
+
+def test_corrupt_existing_cache_fails_closed_without_blocking_builtins(tmp_path, capsys):
+    state = tmp_path / "state"
+    original = TokenNullRouter(state)
+    original.put("cached", "value", evidence_digest=EVIDENCE)
+    for suffix in ("-wal", "-shm"):
+        sidecar = original.db_path.with_name(original.db_path.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+    original.db_path.write_bytes(b"not a sqlite database" * 256)
+
+    router = TokenNullRouter(state)
+    miss = router.route("requires cache lookup")
+    builtin = router.route("ping")
+    stats = router.stats()
+
+    assert miss.route == "ESCALATE"
+    assert miss.reason == "cache_unavailable"
+    assert builtin.route == "ZERO"
+    assert stats["cache_valid"] is False
+    assert stats["cache_entries"] is None
+    with pytest.raises(RuntimeError, match="cache database is unavailable"):
+        router.put("new", "value", evidence_digest=EVIDENCE)
+
+    cli_state = tmp_path / "cli-state"
+    cli_router = TokenNullRouter(cli_state)
+    for suffix in ("-wal", "-shm"):
+        sidecar = cli_router.db_path.with_name(cli_router.db_path.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+    cli_router.db_path.write_bytes(b"not a sqlite database" * 256)
+    code = main(["--state-dir", str(cli_state), "route", "another cache lookup"])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert output["route"] == "ESCALATE"
+    assert output["reason"] == "cache_unavailable"
