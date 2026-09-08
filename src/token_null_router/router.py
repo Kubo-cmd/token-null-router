@@ -7,11 +7,13 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 _SCHEMA = "1"
 _UNSAFE = re.compile(
@@ -25,6 +27,25 @@ _BUILTINS = {
         "A deterministic local fast path. Exact matches use zero model tokens; "
         "novel, stale, or declared side-effecting inputs escalate."
     ),
+}
+_CACHE_SCHEMA = (
+    ("key", "TEXT", 0, 1),
+    ("namespace", "TEXT", 1, 0),
+    ("prompt", "TEXT", 1, 0),
+    ("context_digest", "TEXT", 1, 0),
+    ("response", "TEXT", 1, 0),
+    ("evidence_digest", "TEXT", 1, 0),
+    ("created_at", "REAL", 1, 0),
+    ("expires_at", "REAL", 1, 0),
+)
+_SQLITE_BUSY = getattr(sqlite3, "SQLITE_BUSY", 5)
+_SQLITE_LOCKED = getattr(sqlite3, "SQLITE_LOCKED", 6)
+_TRANSIENT_SQLITE_CODES = {_SQLITE_BUSY, _SQLITE_LOCKED}
+_TRANSIENT_SQLITE_MESSAGES = {
+    "database is busy",
+    "database is locked",
+    "database schema is locked",
+    "database table is locked",
 }
 
 
@@ -54,6 +75,16 @@ def _finite_number(value: int | float, name: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{name} must be a finite number")
     return result
+
+
+def _is_transient_sqlite_error(exc: sqlite3.DatabaseError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in _TRANSIENT_SQLITE_CODES
+    return (
+        isinstance(exc, sqlite3.OperationalError)
+        and str(exc).lower() in _TRANSIENT_SQLITE_MESSAGES
+    )
 
 
 def _receipt_summary(lines: list[str]) -> tuple[bool, int, str, int, int]:
@@ -106,19 +137,98 @@ class TokenNullRouter:
 
     def __init__(self, state_dir: str | Path):
         self.state_dir = Path(state_dir).expanduser().resolve()
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.state_dir.chmod(0o700)
         self.db_path = self.state_dir / "cache.sqlite3"
         self.ledger_path = self.state_dir / "receipts.jsonl"
-        self._init_db()
+        self._cache_available = True
+        try:
+            self._init_db()
+        except sqlite3.DatabaseError as exc:
+            self._cache_available = _is_transient_sqlite_error(exc)
 
-    def _connect(self) -> sqlite3.Connection:
+    @staticmethod
+    def _open_private_regular(path: Path, flags: int, *, create: bool = False) -> int:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if not nofollow:
+            raise RuntimeError("platform does not support no-follow file access")
+        open_flags = (
+            flags
+            | nofollow
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        if create:
+            open_flags |= os.O_CREAT
+        try:
+            descriptor = os.open(path, open_flags, 0o600)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise RuntimeError(f"{path.name} must be a regular file") from exc
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise RuntimeError(f"{path.name} must be a regular file")
+            os.fchmod(descriptor, 0o600)
+            return descriptor
+        except (OSError, RuntimeError):
+            os.close(descriptor)
+            raise
+
+    def _cache_paths(self) -> tuple[Path, Path, Path]:
+        return (
+            self.db_path,
+            self.db_path.with_name(self.db_path.name + "-wal"),
+            self.db_path.with_name(self.db_path.name + "-shm"),
+        )
+
+    def _secure_cache_files(self) -> None:
+        database, *sidecars = self._cache_paths()
+        for path in sidecars:
+            try:
+                descriptor = self._open_private_regular(path, os.O_RDWR)
+            except FileNotFoundError:
+                continue
+            else:
+                os.close(descriptor)
+        descriptor = self._open_private_regular(database, os.O_RDWR, create=True)
+        os.close(descriptor)
+
+    @staticmethod
+    def _validate_cache_schema(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(cache)").fetchall()
+        actual = tuple(
+            (str(row[1]), str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows
+        )
+        if actual != _CACHE_SCHEMA:
+            raise sqlite3.DatabaseError("cache database schema is incompatible")
+
+    def _connect(self, *, validate_schema: bool = True) -> sqlite3.Connection:
+        self._secure_cache_files()
         conn = sqlite3.connect(self.db_path, timeout=5)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=FULL")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            self._secure_cache_files()
+            if validate_schema:
+                self._validate_cache_schema(conn)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    @contextmanager
+    def _connection(self, *, validate_schema: bool = True) -> Iterator[sqlite3.Connection]:
+        conn = self._connect(validate_schema=validate_schema)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._connection(validate_schema=False) as conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS cache (
                     key TEXT PRIMARY KEY,
@@ -131,6 +241,8 @@ class TokenNullRouter:
                     expires_at REAL NOT NULL
                 )"""
             )
+            self._validate_cache_schema(conn)
+        self._secure_cache_files()
 
     @staticmethod
     def cache_key(prompt: str, namespace: str, context_digest: str) -> str:
@@ -169,24 +281,34 @@ class TokenNullRouter:
         ttl = _finite_number(ttl_seconds, "ttl_seconds")
         if ttl < 0:
             raise ValueError("ttl_seconds must be non-negative")
+        if not self._cache_available:
+            raise RuntimeError("cache database is unavailable")
         now = time.time()
         key = self.cache_key(prompt, namespace, context_digest)
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO cache
-                (key, namespace, prompt, context_digest, response, evidence_digest, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    key,
-                    namespace,
-                    _canonical(prompt),
-                    context_digest,
-                    response,
-                    evidence_digest,
-                    now,
-                    now + ttl,
-                ),
-            )
+        try:
+            with self._connection() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO cache
+                    (key, namespace, prompt, context_digest, response, evidence_digest, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        key,
+                        namespace,
+                        _canonical(prompt),
+                        context_digest,
+                        response,
+                        evidence_digest,
+                        now,
+                        now + ttl,
+                    ),
+                )
+            self._secure_cache_files()
+        except sqlite3.DatabaseError as exc:
+            transient = _is_transient_sqlite_error(exc)
+            if not transient:
+                self._cache_available = False
+            state = "temporarily unavailable" if transient else "unavailable"
+            raise RuntimeError(f"cache database is {state}") from exc
         return key
 
     def route(
@@ -220,12 +342,19 @@ class TokenNullRouter:
                 evidence_digest=_digest("builtin:" + canonical + ":" + response),
             )
 
+        if not self._cache_available:
+            return self._escalate("cache_unavailable", canonical, namespace, context_digest)
         key = self.cache_key(canonical, namespace, context_digest)
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT response, evidence_digest, created_at, expires_at FROM cache WHERE key = ?",
-                (key,),
-            ).fetchone()
+        try:
+            with self._connection() as conn:
+                row = conn.execute(
+                    "SELECT response, evidence_digest, created_at, expires_at FROM cache WHERE key = ?",
+                    (key,),
+                ).fetchone()
+        except sqlite3.DatabaseError as exc:
+            if not _is_transient_sqlite_error(exc):
+                self._cache_available = False
+            return self._escalate("cache_unavailable", canonical, namespace, context_digest)
         if row is None:
             return self._escalate("novel_input", canonical, namespace, context_digest)
         response, evidence_digest, created_at, expires_at = row
@@ -298,8 +427,10 @@ class TokenNullRouter:
         return Decision("ESCALATE", None, None, reason, committed)
 
     def _append_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
-        self.ledger_path.touch(mode=0o600, exist_ok=True)
-        with self.ledger_path.open("r+", encoding="utf-8") as handle:
+        descriptor = self._open_private_regular(
+            self.ledger_path, os.O_RDWR, create=True
+        )
+        with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
                 try:
@@ -319,40 +450,50 @@ class TokenNullRouter:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return committed
 
-    def verify_ledger(self) -> tuple[bool, int]:
-        if not self.ledger_path.exists():
-            return True, 0
+    def _read_receipt_lines(self) -> list[str] | None:
         try:
-            with self.ledger_path.open("r", encoding="utf-8") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-                try:
-                    lines = handle.read().splitlines()
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except (OSError, UnicodeDecodeError):
+            descriptor = self._open_private_regular(self.ledger_path, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            try:
+                return handle.read().splitlines()
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def verify_ledger(self) -> tuple[bool, int]:
+        try:
+            lines = self._read_receipt_lines()
+        except (OSError, RuntimeError, UnicodeDecodeError):
             return False, 0
+        if lines is None:
+            return True, 0
         valid, count, _, _, _ = _receipt_summary(lines)
         return valid, count
 
     def stats(self) -> dict[str, Any]:
-        with self._connect() as conn:
-            cache_entries = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
-        valid, receipts = self.verify_ledger()
-        zero = escalate = 0
-        if valid and self.ledger_path.exists():
+        cache_entries = None
+        cache_valid = self._cache_available
+        if cache_valid:
             try:
-                with self.ledger_path.open("r", encoding="utf-8") as handle:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-                    try:
-                        lines = handle.read().splitlines()
-                    finally:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                with self._connection() as conn:
+                    cache_entries = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            except sqlite3.DatabaseError as exc:
+                if not _is_transient_sqlite_error(exc):
+                    self._cache_available = False
+                cache_valid = False
+        valid, receipts = True, 0
+        zero = escalate = 0
+        try:
+            lines = self._read_receipt_lines()
+            if lines is not None:
                 valid, receipts, _, zero, escalate = _receipt_summary(lines)
-            except (OSError, UnicodeDecodeError):
-                valid = False
-                zero = escalate = 0
+        except (OSError, RuntimeError, UnicodeDecodeError):
+            valid = False
         return {
             "cache_entries": cache_entries,
+            "cache_valid": cache_valid,
             "receipts": receipts,
             "ledger_valid": valid,
             "zero_routes": zero,

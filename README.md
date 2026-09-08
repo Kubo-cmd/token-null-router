@@ -53,7 +53,9 @@ This package does not choose or call that model.
 - Any non-empty `side_effects` declaration escalates. A small keyword denylist is defense in depth, not a complete semantic safety classifier.
 - A different context digest cannot reuse a response.
 - Expired entries cannot answer.
+- Corrupt or schema-incompatible cache state cannot answer cache-dependent requests; those routes escalate as `cache_unavailable`, and stats reports `cache_valid: false`. Transient SQLite contention fails closed for the current operation without permanently disabling later cache access.
 - A malformed receipt chain fails verification.
+- The state directory is restricted to mode `0700`; cache, SQLite sidecar, and receipt files are created or tightened to `0600`. Pre-existing symlink and non-regular child paths are rejected.
 - `model_tokens_avoided_lower_bound` counts recorded zero routes, not estimated token volume or answer correctness.
 
 ## Tests
