@@ -1,0 +1,95 @@
+name: Publish verified release assets to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact frozen release tag
+        required: true
+        default: v0.1.0
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && inputs.tag == 'v0.1.0'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/token-null-router
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the frozen tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: refs/tags/v0.1.0
+          persist-credentials: false
+
+      - name: Verify source and download frozen release assets
+        env:
+          EXPECTED_COMMIT: f834b135a21f9e6a64f9dd45401bd7672bfb7d14
+          GH_TOKEN: ${{ github.token }}
+          TAG: v0.1.0
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$TAG" = "${{ inputs.tag }}"
+          mkdir -p release-assets dist
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets \
+            --pattern CHECKSUMS.sha256 \
+            --pattern RELEASE-MANIFEST.json \
+            --pattern token_null_router-0.1.0-py3-none-any.whl \
+            --pattern token_null_router-0.1.0.tar.gz
+          test "$(find release-assets -maxdepth 1 -type f | wc -l | tr -d ' ')" = "4"
+
+      - name: Verify exact frozen bytes and manifest binding
+        env:
+          EXPECTED_COMMIT: f834b135a21f9e6a64f9dd45401bd7672bfb7d14
+          EXPECTED_MANIFEST_SHA256: c6b9da9834dc0f4e33a391846717716775da72f8845ec0204dc5d8f3074f7a6e
+          EXPECTED_CHECKSUMS_SHA256: ae88c9257ebd4aba6de7c0482916eba7bafeb9f2f7e125c82aabb666a5416d2e
+          EXPECTED_WHEEL_SHA256: 77ac4b249ffa802df4bb75505545e7a211099716c8af59ed473f0e3b9a665cb2
+          EXPECTED_SDIST_SHA256: 25c4a24252083e7a51ff3c8513542b3e6d975c5a9593f6d9b6679887e32c6720
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$EXPECTED_MANIFEST_SHA256" release-assets/RELEASE-MANIFEST.json | sha256sum --check --strict -
+          printf '%s  %s\n' "$EXPECTED_CHECKSUMS_SHA256" release-assets/CHECKSUMS.sha256 | sha256sum --check --strict -
+          printf '%s  %s\n' "$EXPECTED_WHEEL_SHA256" release-assets/token_null_router-0.1.0-py3-none-any.whl | sha256sum --check --strict -
+          printf '%s  %s\n' "$EXPECTED_SDIST_SHA256" release-assets/token_null_router-0.1.0.tar.gz | sha256sum --check --strict -
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path("release-assets/RELEASE-MANIFEST.json").read_text())
+          assert manifest["authority"] == "NONE"
+          assert manifest["version"] == "0.1.0"
+          assert manifest["source_commit"] == os.environ["EXPECTED_COMMIT"]
+          artifacts = {
+              filename: metadata["sha256"]
+              for filename, metadata in manifest["artifacts"].items()
+          }
+          assert artifacts == {
+              "token_null_router-0.1.0-py3-none-any.whl": os.environ["EXPECTED_WHEEL_SHA256"],
+              "token_null_router-0.1.0.tar.gz": os.environ["EXPECTED_SDIST_SHA256"],
+          }
+          PY
+          cp release-assets/token_null_router-0.1.0-py3-none-any.whl dist/
+          cp release-assets/token_null_router-0.1.0.tar.gz dist/
+          test "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2"
+
+      - name: Publish only the verified distributions
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: dist/
+          repository-url: https://upload.pypi.org/legacy/
+          verify-metadata: true
+          skip-existing: false
+          attestations: false
+          verbose: true
+          print-hash: true

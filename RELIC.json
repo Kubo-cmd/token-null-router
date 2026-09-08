@@ -1,10 +1,10 @@
 {
   "artifact": "TOKEN NULL ROUTER",
   "version": "0.1.0",
-  "sigil": "TNR-ZERO-v010-C3DD453D47BB",
-  "content_digest": "c3dd453d47bb8c731141b9ca0c4ffccb028ecef540b52b41bce1ad2b0c53c59f",
+  "sigil": "TNR-ZERO-v010-60457CAB935B",
+  "content_digest": "60457cab935b5f5913409d7f70211980bc6c51565ce95132688393ca12a772d1",
   "content_digest_scope": "all tracked and non-ignored repository files except RELIC.json and scripts/verify_relic.py",
   "verifier": "scripts/verify_relic.py",
   "verifier_digest": "3fbeba98f0c1d2694f1f804727a57fbf4373722881f7dc259edf56ca0dd43896",
-  "metadata_digest": "7cda91e381a3841eb1ce198115c1585f2021c1ae2036924ba4ab800cf11593c8"
+  "metadata_digest": "854ed8b6dbbbf9eb4550a3ec95b9c9c6ba0e124c485b61563319749a724f630b"
 }
