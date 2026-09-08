@@ -2,6 +2,9 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -390,3 +393,30 @@ def test_incompatible_cache_schema_is_unavailable_at_initialization(tmp_path):
     assert stats["cache_entries"] is None
     assert result.route == "ESCALATE"
     assert result.reason == "cache_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_code", "expected_field"),
+    [("verify", 2, "valid"), ("stats", 0, "ledger_valid")],
+)
+def test_fifo_receipt_path_is_rejected_without_blocking(
+    tmp_path, command, expected_code, expected_field
+):
+    state = tmp_path / "state"
+    TokenNullRouter(state)
+    os.mkfifo(state / "receipts.jsonl", 0o600)
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "token_null_router.cli", "--state-dir", str(state), command],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        env=environment,
+        cwd=tmp_path,
+    )
+    output = json.loads(result.stdout)
+
+    assert result.returncode == expected_code
+    assert output[expected_field] is False

@@ -139,7 +139,12 @@ class TokenNullRouter:
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         if not nofollow:
             raise RuntimeError("platform does not support no-follow file access")
-        open_flags = flags | nofollow | getattr(os, "O_CLOEXEC", 0)
+        open_flags = (
+            flags
+            | nofollow
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         if create:
             open_flags |= os.O_CREAT
         try:
