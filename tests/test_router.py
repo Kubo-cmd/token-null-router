@@ -10,6 +10,11 @@ import pytest
 
 from token_null_router import TokenNullRouter
 from token_null_router.cli import main
+from token_null_router.router import (
+    _SQLITE_BUSY,
+    _SQLITE_LOCKED,
+    _is_transient_sqlite_error,
+)
 
 EVIDENCE = "a" * 64
 
@@ -420,3 +425,39 @@ def test_fifo_receipt_path_is_rejected_without_blocking(
 
     assert result.returncode == expected_code
     assert output[expected_field] is False
+
+
+def test_sqlite_lock_detection_supports_python_310_exceptions():
+    assert (_SQLITE_BUSY, _SQLITE_LOCKED) == (5, 6)
+    assert _is_transient_sqlite_error(sqlite3.OperationalError("database is locked"))
+    assert _is_transient_sqlite_error(sqlite3.OperationalError("database table is locked"))
+    assert not _is_transient_sqlite_error(sqlite3.DatabaseError("file is not a database"))
+
+
+def test_post_connect_runtime_rejection_closes_connection(tmp_path, monkeypatch):
+    class Connection:
+        closed = False
+
+        def execute(self, _statement):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    router = TokenNullRouter.__new__(TokenNullRouter)
+    router.db_path = tmp_path / "cache.sqlite3"
+    connection = Connection()
+    secure_calls = 0
+
+    def secure_files():
+        nonlocal secure_calls
+        secure_calls += 1
+        if secure_calls == 2:
+            raise RuntimeError("post-connect rejection")
+
+    monkeypatch.setattr(router, "_secure_cache_files", secure_files)
+    monkeypatch.setattr(sqlite3, "connect", lambda *_args, **_kwargs: connection)
+
+    with pytest.raises(RuntimeError, match="post-connect rejection"):
+        router._connect(validate_schema=False)
+    assert connection.closed is True

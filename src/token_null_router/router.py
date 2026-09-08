@@ -38,7 +38,15 @@ _CACHE_SCHEMA = (
     ("created_at", "REAL", 1, 0),
     ("expires_at", "REAL", 1, 0),
 )
-_TRANSIENT_SQLITE_CODES = {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+_SQLITE_BUSY = getattr(sqlite3, "SQLITE_BUSY", 5)
+_SQLITE_LOCKED = getattr(sqlite3, "SQLITE_LOCKED", 6)
+_TRANSIENT_SQLITE_CODES = {_SQLITE_BUSY, _SQLITE_LOCKED}
+_TRANSIENT_SQLITE_MESSAGES = {
+    "database is busy",
+    "database is locked",
+    "database schema is locked",
+    "database table is locked",
+}
 
 
 def _canonical(text: str) -> str:
@@ -71,7 +79,12 @@ def _finite_number(value: int | float, name: str) -> float:
 
 def _is_transient_sqlite_error(exc: sqlite3.DatabaseError) -> bool:
     code = getattr(exc, "sqlite_errorcode", None)
-    return isinstance(code, int) and (code & 0xFF) in _TRANSIENT_SQLITE_CODES
+    if isinstance(code, int):
+        return (code & 0xFF) in _TRANSIENT_SQLITE_CODES
+    return (
+        isinstance(exc, sqlite3.OperationalError)
+        and str(exc).lower() in _TRANSIENT_SQLITE_MESSAGES
+    )
 
 
 def _receipt_summary(lines: list[str]) -> tuple[bool, int, str, int, int]:
@@ -201,7 +214,7 @@ class TokenNullRouter:
             if validate_schema:
                 self._validate_cache_schema(conn)
             return conn
-        except (OSError, sqlite3.Error):
+        except BaseException:
             conn.close()
             raise
 
