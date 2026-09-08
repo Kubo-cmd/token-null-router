@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import stat
 
 import pytest
@@ -282,3 +283,110 @@ def test_corrupt_existing_cache_fails_closed_without_blocking_builtins(tmp_path,
     assert code == 3
     assert output["route"] == "ESCALATE"
     assert output["reason"] == "cache_unavailable"
+
+
+def test_cache_symlink_is_rejected_without_touching_external_target(tmp_path):
+    external = tmp_path / "external.sqlite3"
+    with sqlite3.connect(external) as conn:
+        conn.execute("CREATE TABLE sentinel(value TEXT)")
+    external.chmod(0o644)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "cache.sqlite3").symlink_to(external)
+
+    with pytest.raises(RuntimeError, match="regular file"):
+        TokenNullRouter(state)
+
+    with sqlite3.connect(external) as conn:
+        tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    assert tables == ["sentinel"]
+    assert stat.S_IMODE(external.stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_sqlite_sidecar_symlink_is_rejected(tmp_path, suffix):
+    external = tmp_path / "external"
+    external.write_bytes(b"unchanged")
+    external.chmod(0o644)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / f"cache.sqlite3{suffix}").symlink_to(external)
+
+    with pytest.raises(RuntimeError, match="regular file"):
+        TokenNullRouter(state)
+
+    assert external.read_bytes() == b"unchanged"
+    assert stat.S_IMODE(external.stat().st_mode) == 0o644
+
+
+def test_receipt_symlink_is_rejected_without_touching_external_target(tmp_path):
+    external = tmp_path / "external-receipts"
+    external.write_bytes(b"")
+    external.chmod(0o644)
+    router = TokenNullRouter(tmp_path / "state")
+    router.ledger_path.symlink_to(external)
+
+    with pytest.raises(RuntimeError, match="regular file"):
+        router.route("ping")
+
+    assert external.read_bytes() == b""
+    assert stat.S_IMODE(external.stat().st_mode) == 0o644
+
+
+def test_cache_database_is_private_before_sqlite_connect(tmp_path, monkeypatch):
+    real_connect = sqlite3.connect
+    observed_modes = []
+
+    def observing_connect(path, *args, **kwargs):
+        observed_modes.append(stat.S_IMODE(os.stat(path).st_mode))
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", observing_connect)
+    TokenNullRouter(tmp_path / "state")
+
+    assert observed_modes
+    assert observed_modes[0] == 0o600
+
+
+def test_transient_sqlite_lock_does_not_poison_router(tmp_path, monkeypatch):
+    router = TokenNullRouter(tmp_path / "state")
+    router.put("cached", "value", evidence_digest=EVIDENCE)
+    real_connect = sqlite3.connect
+    blocker = real_connect(router.db_path, timeout=1)
+    blocker.execute("PRAGMA journal_mode=DELETE")
+    blocker.execute("BEGIN EXCLUSIVE")
+
+    def short_connect(path, *args, **kwargs):
+        kwargs["timeout"] = 0.01
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", short_connect)
+    try:
+        blocked = router.route("cached")
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    recovered = router.route("cached")
+    router.put("new", "answer", evidence_digest=EVIDENCE)
+    assert blocked.route == "ESCALATE"
+    assert blocked.reason == "cache_unavailable"
+    assert recovered.route == "ZERO"
+    assert recovered.response == "value"
+    assert router.route("new").response == "answer"
+
+
+def test_incompatible_cache_schema_is_unavailable_at_initialization(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    with sqlite3.connect(state / "cache.sqlite3") as conn:
+        conn.execute("CREATE TABLE cache(x TEXT)")
+
+    router = TokenNullRouter(state)
+    stats = router.stats()
+    result = router.route("unknown")
+
+    assert stats["cache_valid"] is False
+    assert stats["cache_entries"] is None
+    assert result.route == "ESCALATE"
+    assert result.reason == "cache_unavailable"
